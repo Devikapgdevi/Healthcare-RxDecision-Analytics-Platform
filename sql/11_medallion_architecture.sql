@@ -2,36 +2,87 @@
 -- 11_MEDALLION_ARCHITECTURE.SQL
 -- Healthcare RxDecision Analytics Platform
 -- Data Source: Snowflake Marketplace (Definitive Healthcare)
+-- Layers: Bronze -> Silver -> Gold -> Platinum
 -- All tables under 5K records for minimal credit usage
 -- =============================================
 
 USE ROLE ACCOUNTADMIN;
+USE WAREHOUSE COMPUTE_WH;
 
 -- =============================================
 -- BRONZE LAYER (RAW_DB)
+-- Raw data ingestion from Marketplace + synthetic
 -- =============================================
 USE DATABASE RAW_DB;
 USE SCHEMA RAW_SCHEMA;
-USE WAREHOUSE COMPUTE_WH;
 
--- Patient Raw Table (2,000 records seeded from marketplace HCP)
+-- ICD-10 Reference Table (30 codes across 6 diagnosis categories)
+CREATE OR REPLACE TABLE ICD10_REFERENCE (
+    ICD_CODE VARCHAR(10),
+    ICD_DESCRIPTION VARCHAR(200),
+    DIAGNOSIS_CATEGORY VARCHAR(50)
+) AS
+SELECT * FROM VALUES
+    ('I25.10', 'Atherosclerotic heart disease of native coronary artery', 'Cardiology'),
+    ('I50.9',  'Heart failure, unspecified', 'Cardiology'),
+    ('I10',    'Essential (primary) hypertension', 'Cardiology'),
+    ('I48.91', 'Unspecified atrial fibrillation', 'Cardiology'),
+    ('I21.9',  'Acute myocardial infarction, unspecified', 'Cardiology'),
+    ('G43.909','Migraine, unspecified, not intractable', 'Neurology'),
+    ('G40.909','Epilepsy, unspecified, not intractable', 'Neurology'),
+    ('G20',    'Parkinson disease', 'Neurology'),
+    ('G35',    'Multiple sclerosis', 'Neurology'),
+    ('G30.9',  'Alzheimer disease, unspecified', 'Neurology'),
+    ('M54.5',  'Low back pain', 'Orthopedics'),
+    ('M17.11', 'Primary osteoarthritis, right knee', 'Orthopedics'),
+    ('S72.001A','Fracture of unspecified part of neck of right femur', 'Orthopedics'),
+    ('M79.3',  'Panniculitis, unspecified', 'Orthopedics'),
+    ('M25.511','Pain in right shoulder', 'Orthopedics'),
+    ('F32.1',  'Major depressive disorder, single episode, moderate', 'Psychiatry'),
+    ('F41.1',  'Generalized anxiety disorder', 'Psychiatry'),
+    ('F31.9',  'Bipolar disorder, unspecified', 'Psychiatry'),
+    ('F20.9',  'Schizophrenia, unspecified', 'Psychiatry'),
+    ('F43.10', 'Post-traumatic stress disorder, unspecified', 'Psychiatry'),
+    ('Z00.00', 'Encounter for general adult medical examination without abnormal findings', 'Family Medicine'),
+    ('J06.9',  'Acute upper respiratory infection, unspecified', 'Family Medicine'),
+    ('E11.9',  'Type 2 diabetes mellitus without complications', 'Family Medicine'),
+    ('J45.20', 'Mild intermittent asthma, uncomplicated', 'Family Medicine'),
+    ('E78.5',  'Hyperlipidemia, unspecified', 'Family Medicine'),
+    ('R51.9',  'Headache, unspecified', 'General'),
+    ('R10.9',  'Unspecified abdominal pain', 'General'),
+    ('R50.9',  'Fever, unspecified', 'General'),
+    ('R05.9',  'Cough, unspecified', 'General'),
+    ('R53.83', 'Other fatigue', 'General');
+
+-- Patient Raw Table (2,000 records with ICD-10 codes)
 CREATE OR REPLACE TABLE PATIENT_RAW AS
 WITH MARKETPLACE_SEED AS (
     SELECT FIRST_NAME, LAST_NAME, GENDER, CITY, STATE, ZIP, PRIMARY_SPECIALTY,
         ROW_NUMBER() OVER (ORDER BY HCP_NPI) AS RN
     FROM RXDECISION_INSIGHTS_PRESCRIPTION_THERAPY_DECISIONS_SAMPLE.SAMPLES.REF_HCP_BY_NPI
 ),
-GENERATED AS (SELECT SEQ4() + 1 AS ID FROM TABLE(GENERATOR(ROWCOUNT => 2000)))
-SELECT
-    'P' || LPAD(g.ID::STRING, 5, '0') AS PATIENT_ID,
-    s.FIRST_NAME || ' ' || s.LAST_NAME AS NAME,
-    UNIFORM(18, 90, RANDOM()) AS AGE, s.GENDER,
-    DATEADD(DAY, -UNIFORM(1, 365, RANDOM()), CURRENT_DATE()) AS ADMISSION_DATE,
-    CASE UNIFORM(1, 6, RANDOM()) WHEN 1 THEN 'Cardiology' WHEN 2 THEN 'Neurology'
-        WHEN 3 THEN 'Orthopedics' WHEN 4 THEN 'Psychiatry' WHEN 5 THEN 'Family Medicine' ELSE 'General' END AS DIAGNOSIS
-FROM GENERATED g JOIN MARKETPLACE_SEED s ON s.RN = MOD(g.ID - 1, 100) + 1;
+GENERATED AS (SELECT SEQ4() + 1 AS ID FROM TABLE(GENERATOR(ROWCOUNT => 2000))),
+BASE_PATIENTS AS (
+    SELECT
+        'P' || LPAD(g.ID::STRING, 5, '0') AS PATIENT_ID,
+        s.FIRST_NAME || ' ' || s.LAST_NAME AS NAME,
+        UNIFORM(18, 90, RANDOM()) AS AGE, s.GENDER,
+        DATEADD(DAY, -UNIFORM(1, 365, RANDOM()), CURRENT_DATE()) AS ADMISSION_DATE,
+        CASE UNIFORM(1, 6, RANDOM()) WHEN 1 THEN 'Cardiology' WHEN 2 THEN 'Neurology'
+            WHEN 3 THEN 'Orthopedics' WHEN 4 THEN 'Psychiatry' WHEN 5 THEN 'Family Medicine' ELSE 'General' END AS DIAGNOSIS
+    FROM GENERATED g JOIN MARKETPLACE_SEED s ON s.RN = MOD(g.ID - 1, 100) + 1
+)
+SELECT p.PATIENT_ID, p.NAME, p.AGE, p.GENDER, p.ADMISSION_DATE, p.DIAGNOSIS,
+    icd.ICD_CODE, icd.ICD_DESCRIPTION
+FROM BASE_PATIENTS p
+JOIN (
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY DIAGNOSIS_CATEGORY ORDER BY ICD_CODE) AS RN,
+        COUNT(*) OVER (PARTITION BY DIAGNOSIS_CATEGORY) AS CAT_COUNT
+    FROM ICD10_REFERENCE
+) icd ON p.DIAGNOSIS = icd.DIAGNOSIS_CATEGORY
+    AND icd.RN = MOD(ABS(HASH(p.PATIENT_ID)), icd.CAT_COUNT) + 1;
 
--- Hospitals (marketplace HCO)
+-- Hospitals (Marketplace HCO)
 CREATE OR REPLACE TABLE HOSPITALS AS
 SELECT h.HCO_NPI AS FACILITY_NPI, h.ORG_NAME AS HOSPITAL_NAME, h.CITY, h.STATE, h.ZIP, h.PHONE, h.DEFINITIVE_ID,
     f.NUMBER_BEDS, f.NET_PATIENT_REVENUE, f.TOTAL_PATIENT_REVENUE, f.NET_INCOME, f.YEAR AS FINANCIAL_YEAR
@@ -39,15 +90,15 @@ FROM RXDECISION_INSIGHTS_PRESCRIPTION_THERAPY_DECISIONS_SAMPLE.SAMPLES.REF_HCO_B
 LEFT JOIN RXDECISION_INSIGHTS_PRESCRIPTION_THERAPY_DECISIONS_SAMPLE.SAMPLES.REF_HCO_FINANCIAL_AND_CLINICAL_METRICS f
     ON h.DEFINITIVE_ID = f.DEFINITIVE_ID;
 
--- HCO Locations (marketplace)
+-- HCO Locations (Marketplace)
 CREATE OR REPLACE TABLE HCO_LOCATIONS AS
 SELECT * FROM RXDECISION_INSIGHTS_PRESCRIPTION_THERAPY_DECISIONS_SAMPLE.SAMPLES.REF_HCO_LOCATIONS_BY_DEFINITIVE_ID;
 
--- Provider Affiliations (marketplace)
+-- Provider Affiliations (Marketplace)
 CREATE OR REPLACE TABLE PROVIDER_AFFILIATIONS AS
 SELECT * FROM RXDECISION_INSIGHTS_PRESCRIPTION_THERAPY_DECISIONS_SAMPLE.SAMPLES.AFFILIATIONS_HCP_HCO_BY_NPI_ACTIVE;
 
--- Prescription Data (marketplace Rx)
+-- Prescription Data (Marketplace Rx)
 CREATE OR REPLACE TABLE PRESCRIPTION_DATA AS
 SELECT r.CLAIM_YEAR, r.PRODUCT AS MEDICATION_NAME, r.HCP_NPI AS PRESCRIBER_NPI,
     r.RX_EVENT_TYPE, r.RX_EVENT_CLAIMS, r.RX_TOTAL_CLAIMS, r.RX_EVENT_SCORE_DECILE,
@@ -74,14 +125,38 @@ SELECT 'B' || LPAD(SEQ4()::STRING, 6, '0') AS BILL_ID,
     CASE MOD(ABS(RANDOM()), 3) WHEN 0 THEN 'PAID' WHEN 1 THEN 'PENDING' ELSE 'OVERDUE' END AS STATUS
 FROM TABLE(GENERATOR(ROWCOUNT => 3000));
 
+-- Device Alerts (1,500 records)
+CREATE OR REPLACE TABLE DEVICE_ALERTS AS
+SELECT 'A' || LPAD(SEQ4()::STRING, 6, '0') AS ALERT_ID,
+    'DEV' || LPAD(MOD(ABS(RANDOM()), 100)::STRING, 3, '0') AS DEVICE_ID,
+    'P' || LPAD(MOD(ABS(RANDOM()), 2000)::STRING, 5, '0') AS PATIENT_ID,
+    CASE MOD(ABS(RANDOM()), 5) WHEN 0 THEN 'Low Battery' WHEN 1 THEN 'Connection Lost' WHEN 2 THEN 'Abnormal Reading' WHEN 3 THEN 'Calibration Needed' ELSE 'Maintenance Due' END AS ALERT_TYPE,
+    CASE MOD(ABS(RANDOM()), 3) WHEN 0 THEN 'LOW' WHEN 1 THEN 'MEDIUM' ELSE 'HIGH' END AS SEVERITY,
+    DATEADD(HOUR, -MOD(ABS(RANDOM()), 168), CURRENT_TIMESTAMP()) AS ALERT_TIMESTAMP,
+    CASE WHEN MOD(ABS(RANDOM()), 2) = 0 THEN TRUE ELSE FALSE END AS ACKNOWLEDGED
+FROM TABLE(GENERATOR(ROWCOUNT => 1500));
+
+-- Medication Records (3,000 records)
+CREATE OR REPLACE TABLE MEDICATION_RECORDS AS
+SELECT 'M' || LPAD(SEQ4()::STRING, 6, '0') AS RECORD_ID,
+    'P' || LPAD(MOD(ABS(RANDOM()), 2000)::STRING, 5, '0') AS PATIENT_ID,
+    CASE MOD(ABS(RANDOM()), 10) WHEN 0 THEN 'Aspirin' WHEN 1 THEN 'Metformin' WHEN 2 THEN 'Lisinopril' WHEN 3 THEN 'Atorvastatin' WHEN 4 THEN 'Metoprolol' WHEN 5 THEN 'Amlodipine' WHEN 6 THEN 'Omeprazole' WHEN 7 THEN 'Levothyroxine' WHEN 8 THEN 'Gabapentin' ELSE 'Lamotrigine' END AS MEDICATION_NAME,
+    CASE MOD(ABS(RANDOM()), 4) WHEN 0 THEN '10mg' WHEN 1 THEN '25mg' WHEN 2 THEN '50mg' ELSE '100mg' END AS DOSAGE,
+    CASE MOD(ABS(RANDOM()), 4) WHEN 0 THEN 'Once daily' WHEN 1 THEN 'Twice daily' WHEN 2 THEN 'Three times daily' ELSE 'As needed' END AS FREQUENCY,
+    DATEADD(DAY, -MOD(ABS(RANDOM()), 180), CURRENT_DATE()) AS PRESCRIBED_DATE,
+    'Dr. ' || CASE MOD(ABS(RANDOM()), 5) WHEN 0 THEN 'Smith' WHEN 1 THEN 'Johnson' WHEN 2 THEN 'Williams' WHEN 3 THEN 'Brown' ELSE 'Davis' END AS PRESCRIBING_DOCTOR
+FROM TABLE(GENERATOR(ROWCOUNT => 3000));
+
 -- =============================================
 -- SILVER LAYER (TRANSFORM_DB)
+-- Cleansed, validated, enriched data
 -- =============================================
 USE DATABASE TRANSFORM_DB;
 USE SCHEMA TRANSFORM_SCHEMA;
 
 CREATE OR REPLACE TABLE CLEAN_PATIENT AS
 SELECT PATIENT_ID, NAME, AGE, GENDER, ADMISSION_DATE, DIAGNOSIS,
+    ICD_CODE, ICD_DESCRIPTION,
     LEFT(PATIENT_ID, 2) || '***' AS PATIENT_ID_MASKED, CURRENT_TIMESTAMP() AS ETL_TIMESTAMP
 FROM RAW_DB.RAW_SCHEMA.PATIENT_RAW;
 
@@ -93,18 +168,20 @@ FROM RAW_DB.RAW_SCHEMA.ICU_EVENTS;
 
 -- =============================================
 -- GOLD LAYER (ANALYTICS_DB)
+-- Aggregated, business-ready analytics
 -- =============================================
 USE DATABASE ANALYTICS_DB;
 USE SCHEMA ANALYTICS_SCHEMA;
 
 CREATE OR REPLACE TABLE PATIENT_ANALYTICS AS
 SELECT p.PATIENT_ID, p.NAME, p.AGE, p.GENDER, p.ADMISSION_DATE, p.DIAGNOSIS,
+    p.ICD_CODE, p.ICD_DESCRIPTION,
     COUNT(e.EVENT_ID) AS ICU_EVENT_COUNT, AVG(e.HEART_RATE) AS AVG_HEART_RATE,
     AVG(e.OXYGEN_LEVEL) AS AVG_OXYGEN_LEVEL,
     SUM(CASE WHEN e.IS_CRITICAL THEN 1 ELSE 0 END) AS CRITICAL_EVENT_COUNT
 FROM TRANSFORM_DB.TRANSFORM_SCHEMA.CLEAN_PATIENT p
 LEFT JOIN TRANSFORM_DB.TRANSFORM_SCHEMA.CLEAN_ICU_EVENTS e ON p.PATIENT_ID = e.PATIENT_ID
-GROUP BY p.PATIENT_ID, p.NAME, p.AGE, p.GENDER, p.ADMISSION_DATE, p.DIAGNOSIS;
+GROUP BY p.PATIENT_ID, p.NAME, p.AGE, p.GENDER, p.ADMISSION_DATE, p.DIAGNOSIS, p.ICD_CODE, p.ICD_DESCRIPTION;
 
 CREATE OR REPLACE TABLE BILLING_ANALYTICS AS
 SELECT PATIENT_ID, COUNT(*) AS TOTAL_BILLS, SUM(AMOUNT) AS TOTAL_AMOUNT, AVG(AMOUNT) AS AVG_BILL_AMOUNT,
@@ -112,3 +189,71 @@ SELECT PATIENT_ID, COUNT(*) AS TOTAL_BILLS, SUM(AMOUNT) AS TOTAL_AMOUNT, AVG(AMO
     SUM(CASE WHEN STATUS = 'PENDING' THEN AMOUNT ELSE 0 END) AS PENDING_AMOUNT,
     SUM(CASE WHEN STATUS = 'OVERDUE' THEN AMOUNT ELSE 0 END) AS OVERDUE_AMOUNT
 FROM RAW_DB.RAW_SCHEMA.BILLING_DATA GROUP BY PATIENT_ID;
+
+-- =============================================
+-- PLATINUM LAYER (AI_READY_DB)
+-- ML feature store, NLP-ready notes, embeddings
+-- =============================================
+USE DATABASE AI_READY_DB;
+USE SCHEMA FEATURE_STORE;
+
+CREATE OR REPLACE TABLE ICU_FEATURE_STORE AS
+SELECT e.PATIENT_ID, p.AGE, p.GENDER, p.DIAGNOSIS, p.ICD_CODE, p.ICD_DESCRIPTION,
+    COUNT(*) AS TOTAL_EVENTS,
+    SUM(CASE WHEN e.IS_CRITICAL THEN 1 ELSE 0 END) AS CRITICAL_EVENTS,
+    AVG(e.HEART_RATE) AS AVG_HEART_RATE, MIN(e.HEART_RATE) AS MIN_HEART_RATE,
+    MAX(e.HEART_RATE) AS MAX_HEART_RATE, STDDEV(e.HEART_RATE) AS STD_HEART_RATE,
+    AVG(e.OXYGEN_LEVEL) AS AVG_OXYGEN, MIN(e.OXYGEN_LEVEL) AS MIN_OXYGEN,
+    MAX(e.OXYGEN_LEVEL) AS MAX_OXYGEN, STDDEV(e.OXYGEN_LEVEL) AS STD_OXYGEN,
+    DATEDIFF(DAY, MIN(e.EVENT_TIMESTAMP), MAX(e.EVENT_TIMESTAMP)) AS ICU_STAY_DAYS,
+    ROUND(SUM(CASE WHEN e.IS_CRITICAL THEN 1 ELSE 0 END)::FLOAT / NULLIF(COUNT(*), 0) * 100, 2) AS CRITICAL_EVENT_RATE,
+    CASE WHEN AVG(e.OXYGEN_LEVEL) < 90 OR AVG(e.HEART_RATE) > 110 THEN 'HIGH'
+         WHEN AVG(e.OXYGEN_LEVEL) < 94 OR AVG(e.HEART_RATE) > 100 THEN 'MEDIUM'
+         ELSE 'LOW' END AS RISK_SCORE,
+    CURRENT_TIMESTAMP() AS FEATURE_TIMESTAMP
+FROM TRANSFORM_DB.TRANSFORM_SCHEMA.CLEAN_ICU_EVENTS e
+JOIN TRANSFORM_DB.TRANSFORM_SCHEMA.CLEAN_PATIENT p ON e.PATIENT_ID = p.PATIENT_ID
+GROUP BY e.PATIENT_ID, p.AGE, p.GENDER, p.DIAGNOSIS, p.ICD_CODE, p.ICD_DESCRIPTION;
+
+CREATE OR REPLACE TABLE PATIENT_NOTES AS
+SELECT 'N' || LPAD(SEQ4()::STRING, 6, '0') AS NOTE_ID,
+    'P' || LPAD(MOD(ABS(RANDOM()), 2000)::STRING, 5, '0') AS PATIENT_ID,
+    CASE MOD(ABS(RANDOM()), 5)
+        WHEN 0 THEN 'Patient presents with chest pain and shortness of breath. ECG shows normal sinus rhythm.'
+        WHEN 1 THEN 'Follow-up visit for diabetes management. Blood sugar levels improving with current medication.'
+        WHEN 2 THEN 'Post-operative day 2. Wound healing well. No signs of infection.'
+        WHEN 3 THEN 'Patient reports dizziness and fatigue. Ordered blood work to check for anemia.'
+        ELSE 'Routine checkup. All vitals within normal range. Continue current treatment plan.' END AS NOTE_TEXT,
+    DATEADD(DAY, -MOD(ABS(RANDOM()), 90), CURRENT_DATE()) AS NOTE_DATE,
+    CASE MOD(ABS(RANDOM()), 4) WHEN 0 THEN 'Progress Note' WHEN 1 THEN 'Discharge Summary' WHEN 2 THEN 'Consultation' ELSE 'Lab Results' END AS NOTE_TYPE
+FROM TABLE(GENERATOR(ROWCOUNT => 2000));
+
+CREATE OR REPLACE TABLE PATIENT_EMBEDDINGS AS
+SELECT PATIENT_ID,
+    ARRAY_CONSTRUCT(UNIFORM(0::FLOAT,1::FLOAT,RANDOM()),UNIFORM(0::FLOAT,1::FLOAT,RANDOM()),
+        UNIFORM(0::FLOAT,1::FLOAT,RANDOM()),UNIFORM(0::FLOAT,1::FLOAT,RANDOM()),
+        UNIFORM(0::FLOAT,1::FLOAT,RANDOM()),UNIFORM(0::FLOAT,1::FLOAT,RANDOM()),
+        UNIFORM(0::FLOAT,1::FLOAT,RANDOM()),UNIFORM(0::FLOAT,1::FLOAT,RANDOM())) AS EMBEDDING_VECTOR,
+    CURRENT_TIMESTAMP() AS CREATED_AT
+FROM TRANSFORM_DB.TRANSFORM_SCHEMA.CLEAN_PATIENT;
+
+USE SCHEMA SEMANTIC_MODELS;
+
+CREATE OR REPLACE VIEW V_PATIENT_SEMANTIC AS
+SELECT p.PATIENT_ID AS "Patient ID", p.AGE AS "Age", p.GENDER AS "Gender", p.DIAGNOSIS AS "Diagnosis",
+    p.ICD_CODE AS "ICD Code", p.ICD_DESCRIPTION AS "ICD Description",
+    a.ICU_EVENT_COUNT AS "Total ICU Events",
+    a.CRITICAL_EVENT_COUNT AS "Critical Events",
+    ROUND(a.AVG_HEART_RATE, 1) AS "Average Heart Rate",
+    ROUND(a.AVG_OXYGEN_LEVEL, 1) AS "Average Oxygen Level",
+    (CASE WHEN p.AGE >= 65 THEN 1 ELSE 0 END)
+        + (CASE WHEN a.AVG_OXYGEN_LEVEL < 92 THEN 1 ELSE 0 END)
+        + (CASE WHEN a.AVG_HEART_RATE > 100 THEN 1 ELSE 0 END)
+        + (CASE WHEN a.CRITICAL_EVENT_COUNT > 5 THEN 1 ELSE 0 END) AS "Risk Score",
+    COALESCE(b.TOTAL_AMOUNT, 0) AS "Total Billing Amount",
+    CASE WHEN p.AGE >= 65 THEN 1 ELSE 0 END AS "Age Risk Flag",
+    CASE WHEN a.AVG_OXYGEN_LEVEL < 92 THEN 1 ELSE 0 END AS "Low Oxygen Risk Flag",
+    CASE WHEN a.AVG_HEART_RATE > 100 THEN 1 ELSE 0 END AS "High Heart Rate Risk Flag"
+FROM ANALYTICS_DB.ANALYTICS_SCHEMA.PATIENT_ANALYTICS a
+JOIN TRANSFORM_DB.TRANSFORM_SCHEMA.CLEAN_PATIENT p ON a.PATIENT_ID = p.PATIENT_ID
+LEFT JOIN ANALYTICS_DB.ANALYTICS_SCHEMA.BILLING_ANALYTICS b ON a.PATIENT_ID = b.PATIENT_ID;

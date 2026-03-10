@@ -1,6 +1,9 @@
 -- =============================================
 -- 12_HEALTHCARE_INDUSTRY.SQL
 -- Healthcare RxDecision Analytics Platform
+-- Healthcare-specific Bronze tables (standalone re-run)
+-- Run this to rebuild healthcare industry tables independently
+-- Depends on: RAW_DB.RAW_SCHEMA exists
 -- Under 5K records per table
 -- =============================================
 
@@ -9,6 +12,7 @@ USE DATABASE RAW_DB;
 USE SCHEMA RAW_SCHEMA;
 USE WAREHOUSE COMPUTE_WH;
 
+-- Device Alerts (1,500 records)
 CREATE OR REPLACE TABLE DEVICE_ALERTS AS
 SELECT 'A' || LPAD(SEQ4()::STRING, 6, '0') AS ALERT_ID,
     'DEV' || LPAD(MOD(ABS(RANDOM()), 100)::STRING, 3, '0') AS DEVICE_ID,
@@ -19,6 +23,7 @@ SELECT 'A' || LPAD(SEQ4()::STRING, 6, '0') AS ALERT_ID,
     CASE WHEN MOD(ABS(RANDOM()), 2) = 0 THEN TRUE ELSE FALSE END AS ACKNOWLEDGED
 FROM TABLE(GENERATOR(ROWCOUNT => 1500));
 
+-- Medication Records (3,000 records)
 CREATE OR REPLACE TABLE MEDICATION_RECORDS AS
 SELECT 'M' || LPAD(SEQ4()::STRING, 6, '0') AS RECORD_ID,
     'P' || LPAD(MOD(ABS(RANDOM()), 2000)::STRING, 5, '0') AS PATIENT_ID,
@@ -28,6 +33,3 @@ SELECT 'M' || LPAD(SEQ4()::STRING, 6, '0') AS RECORD_ID,
     DATEADD(DAY, -MOD(ABS(RANDOM()), 180), CURRENT_DATE()) AS PRESCRIBED_DATE,
     'Dr. ' || CASE MOD(ABS(RANDOM()), 5) WHEN 0 THEN 'Smith' WHEN 1 THEN 'Johnson' WHEN 2 THEN 'Williams' WHEN 3 THEN 'Brown' ELSE 'Davis' END AS PRESCRIBING_DOCTOR
 FROM TABLE(GENERATOR(ROWCOUNT => 3000));
-
-SELECT 'DEVICE_ALERTS' AS TABLE_NAME, COUNT(*) AS RECORDS FROM RAW_DB.RAW_SCHEMA.DEVICE_ALERTS
-UNION ALL SELECT 'MEDICATION_RECORDS', COUNT(*) FROM RAW_DB.RAW_SCHEMA.MEDICATION_RECORDS;

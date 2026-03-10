@@ -2,6 +2,7 @@
 -- MASTER_DEPLOYMENT.SQL
 -- Healthcare RxDecision Analytics Platform
 -- Data Source: Snowflake Marketplace (Definitive Healthcare)
+-- Architecture: Bronze -> Silver -> Gold -> Platinum (ICD-10)
 -- =============================================
 
 -- PREREQUISITE: Install the free marketplace dataset first:
@@ -20,6 +21,9 @@
 -- 8.  08_data_governance.sql         - Tags, masking, row access policies
 -- 9.  09_audit_layer.sql             - 6 audit/compliance views
 -- 10. 10_verification.sql            - Deployment validation
--- 11. 11_medallion_architecture.sql  - Bronze/Silver/Gold data (marketplace-backed)
--- 12. 12_healthcare_industry.sql     - Device alerts, medication records
--- 13. 13_ai_ready_layer.sql          - ML feature store, NLP notes, embeddings
+-- 11. 11_medallion_architecture.sql  - All 4 layers: Bronze/Silver/Gold/Platinum (ICD-10)
+-- 12. 12_healthcare_industry.sql     - Device alerts, medication records (standalone re-run)
+-- 13. 13_ai_ready_layer.sql          - Platinum layer (standalone re-run)
+
+-- NOTE: Scripts 12 and 13 are standalone re-run scripts for their respective layers.
+-- Script 11 is the master data pipeline that builds all 4 medallion layers end-to-end.
