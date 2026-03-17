@@ -5,6 +5,8 @@
 -- =============================================
 
 USE ROLE ACCOUNTADMIN;
+USE DATABASE SECURITY_DB;
+USE SCHEMA PUBLIC;
 
 -- Network Policy
 CREATE OR REPLACE NETWORK POLICY HC_NETWORK_POLICY
