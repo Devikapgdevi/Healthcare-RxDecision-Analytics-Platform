@@ -37,7 +37,7 @@ GROUP BY e.PATIENT_ID, p.AGE, p.GENDER, p.DIAGNOSIS, p.ICD_CODE, p.ICD_DESCRIPTI
 
 CREATE OR REPLACE TABLE PATIENT_NOTES AS
 SELECT 'N' || LPAD(SEQ4()::STRING, 6, '0') AS NOTE_ID,
-    'P' || LPAD(MOD(ABS(RANDOM()), 2000)::STRING, 5, '0') AS PATIENT_ID,
+    'P' || LPAD((MOD(ABS(RANDOM()), 2000) + 1)::STRING, 5, '0') AS PATIENT_ID,
     CASE MOD(ABS(RANDOM()), 5)
         WHEN 0 THEN 'Patient presents with chest pain and shortness of breath. ECG shows normal sinus rhythm.'
         WHEN 1 THEN 'Follow-up visit for diabetes management. Blood sugar levels improving with current medication.'
